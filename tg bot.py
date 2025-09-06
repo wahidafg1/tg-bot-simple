@@ -12,5 +12,8 @@ def start(message):
 @bot.message_handler(commands=['help'])
 def help_cmd(message):
  bot.reply_to(message, "/start 4 =0G0FP\n/help 4 ?><>IP")
+@bot.message_handler(commands=['about'])
+def aboutme(message):
+ bot.reply_to(message,"@wahidabdullahi1")
 if __name__ == "__main__":
  bot.infinity_polling(skip_pending=True)
