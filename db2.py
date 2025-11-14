@@ -52,6 +52,13 @@ def init_db() -> None:
 
     CREATE INDEX IF NOT EXISTS idx_users_hour ON users(notify_hour);
     CREATE INDEX IF NOT EXISTS idx_users_sent ON users(last_sent_date);
+    
+    CREATE TABLE IF NOT EXISTS models (
+    id INTEGER PRIMARY KEY,
+    key TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0,1))
+    );
     """
     with _connect() as conn:
         conn.executescript(schema)

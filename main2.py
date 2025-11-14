@@ -5,12 +5,19 @@ import time
 import json
 import datetime
 from collections import defaultdict
+from db import *
+from telebot import types
+import random
+from db import (get_character_by_id)
+from openrouter_client import chat_once, OpenRouterError
 
 # Загрузка переменных окружения
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("В .env файле нет TOKEN")
+
+init_db()
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -126,10 +133,181 @@ load_notes()
 load_activity()
 
 
+def cmd_start(message: types.Message) -> None:
+    """
+    Поприветствовать пользователя и кратко описать команды.
+    """
+    text = (
+        "Привет! Это заметочник на SQLite.\n\n"
+        "Команды:\n"
+        " /note_add <текст>\n"
+        " /note_list [N]\n"
+        " /note_find <подстрока>\n"
+        " /note_edit <id> <текст>\n"
+        " /note_del <id>\n"
+        " /note_count\n"
+        " /note_export\n"
+        " /note_stats [days]\n"
+        " /models\n"
+        " /model <id>\n"
+    )
+
+
+# Добавляем недостающую функцию
+def _build_messages_for_character(character, question):
+    """
+    Создает список сообщений для общения с персонажем
+    """
+    character_name = character.get('name', 'Персонаж')
+    system_prompt = character.get('system_prompt', f'Ты - {character_name}. Отвечай в соответствии со своей ролью.')
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": question}
+    ]
+
+    return messages
+
+
+@bot.message_handler(commands=["characters"])
+def cmd_characters(message: types.Message) -> None:
+    """
+    Показать список персонажей
+    """
+    user_id = message.from_user.id
+    items = list_characters()
+    if not items:
+        bot.reply_to(message, "Каталог персонажей пуст.")
+        return
+
+    # Текущий персонаж пользователя
+    try:
+        current = get_user_character(user_id)["id"]
+    except Exception:
+        current = None
+
+    lines = ["Доступные персонажи:"]
+    for p in items:
+        star = "*" if current is not None and p["id"] == current else ""
+        lines.append(f"{star} {p['id']}. {p['name']}")
+
+    lines.append("\nВыбор: /character <ID>")
+    bot.reply_to(message, "\n".join(lines))
+
+
+@bot.message_handler(commands=["character"])
+def cmd_character(message: types.Message) -> None:
+    user_id = message.from_user.id
+    arg = message.text.replace("/character", "", 1).strip()
+    if not arg:
+        p = get_user_character(user_id)
+        bot.reply_to(message, f"Текущий персонаж: {p['name']}\n(Сменить: /characters, затем /character <ID>)")
+        return
+    if not arg.isdigit():
+        bot.reply_to(message, "Использование: /character <ID из /characters>")
+        return
+    try:
+        p = set_user_character(user_id, int(arg))
+        bot.reply_to(message, f"Персонаж установлен: {p['name']}")
+    except ValueError:
+        bot.reply_to(message, "Неизвестный ID персонажа. Сначала /characters.")
+
+
+@bot.message_handler(commands=["whoami"])
+def cmd_whoami(message: types.Message) -> None:
+    character = get_user_character(message.from_user.id)
+    model = get_active_model()
+    bot.reply_to(message, f"Модель: {model['label']} ({model['key']})\nПерсонаж: {character['name']}")
+
+
+@bot.message_handler(commands=["ask_random"])
+def cmd_ask_random(message: types.Message) -> None:
+    q = message.text.replace("/ask_random", "", 1).strip()
+    if not q:
+        bot.reply_to(message, "Использование: /ask_random <вопрос>")
+        return
+    q = q[:600]
+
+    items = list_characters()
+    if not items:
+        bot.reply_to(message, "Каталог персонажей пуст.")
+        return
+    chosen = random.choice(items)
+    character = get_character_by_id(chosen["id"])
+
+    msgs = _build_messages_for_character(character, q)
+    model_key = get_active_model()["key"]
+    try:
+        text, ms = chat_once(msgs, model=model_key, temperature=0.2, max_tokens=400)
+        out = (text or "").strip()[:4000]
+        bot.reply_to(message, f"{out}\n\n({ms} сек; модель: {model_key}; как: {character['name']})")
+    except OpenRouterError as e:
+        bot.reply_to(message, f"Ошибка: {e}")
+    except Exception:
+        bot.reply_to(message, "Непредвиденная ошибка.")
+
+
+@bot.message_handler(commands=["models"])
+def cmd_models(message: types.Message) -> None:
+    items = list_models()
+    if not items:
+        bot.reply_to(message, "Список моделей пуст.")
+        return
+    lines = ["Доступные модели:"]
+    for m in items:
+        star = "★" if m["active"] else " "
+        lines.append(f"{star} {m['id']}. {m['label']}  [{m['key']}]")
+    lines.append("\nАктивировать: /model <ID>")
+    bot.reply_to(message, "\n".join(lines))
+
+
+@bot.message_handler(commands=["model"])
+def cmd_model(message: types.Message) -> None:
+    arg = message.text.replace('/model', '', 1).strip()
+    if not arg:
+        active = get_active_model()
+        bot.reply_to(message,
+                     f"Текущая активная модель: {active['label']} {active['key']}\n(список: /model <ID> или /models)")
+        return
+    if not arg.isdigit():
+        bot.reply_to(message, "Использование: /model <ID из /models>")
+        return
+    try:
+        active = set_active_model(int(arg))
+        bot.reply_to(message, f"Активная модель переключена: {active['label']} {active['key']}")
+    except ValueError:
+        bot.reply_to(message, "Неизвестный ID модели. Сначала /models.")
+
+
 @bot.message_handler(commands=['start'])
 def start(message):
     log_activity(message.from_user.id)
     bot.reply_to(message, "Привет! Я бот для заметок. Используй /help для списка команд.")
+
+
+@bot.message_handler(commands=["start", "help"])
+def cmd_start(message: types.Message) -> None:
+    text = (
+        "Привет! Это заметочник на SQLite.\n\n"
+        "Команды:\n"
+        " /note_add <текст>\n"
+        " /note_list [N]\n"
+        " /note_find <подстрока>\n"
+        " /note_edit <id> <текст>\n"
+        " /note_del <id>\n"
+        " /note_count\n"
+        " /note_export\n"
+        " /note_stats [days]\n"
+        " /models\n"
+        " /model <id>\n"
+        " /ask <вопрос>\n"
+        " /ask_random <вопрос>\n"
+        " /characters\n"
+        " /character <id>\n"
+        " /whoami\n"
+        " /ask_model <ID> <вопрос>\n"
+    )
+    bot.reply_to(message, text)
 
 
 @bot.message_handler(commands=['help'])
@@ -280,6 +458,72 @@ def note_export(message):
     # Удаляем временный файл
     os.remove(filename)
 
+
+@bot.message_handler(commands=["ask_model"])
+def cmd_ask_model(message: types.Message) -> None:
+    """
+    Выполнить запрос к конкретной модели по ID без смены активной модели
+    Использование: /ask_model <ID модели> <вопрос>
+    """
+    user_id = message.from_user.id
+    args = message.text.replace("/ask_model", "", 1).strip().split(maxsplit=1)
+
+    if len(args) < 2 or not args[0].isdigit():
+        bot.reply_to(message, "Использование: /ask_model <ID модели> <вопрос>\n\nСписок моделей: /models")
+        return
+
+    model_id = int(args[0])
+    question = args[1].strip()[:600]
+
+    if not question:
+        bot.reply_to(message, "Ошибка: Укажите текст вопроса.")
+        return
+
+    # Получаем информацию о запрашиваемой модели
+    try:
+        models = list_models()
+        target_model = None
+        for model in models:
+            if model["id"] == model_id:
+                target_model = model
+                break
+
+        if not target_model:
+            bot.reply_to(message, f"Ошибка: Модель с ID {model_id} не найдена.\nСписок моделей: /models")
+            return
+
+    except Exception as e:
+        bot.reply_to(message, f"Ошибка при получении списка моделей: {e}")
+        return
+
+    # Получаем текущего персонажа пользователя
+    try:
+        character = get_user_character(user_id)
+    except Exception as e:
+        bot.reply_to(message, f"Ошибка при получении персонажа: {e}")
+        return
+
+    # Формируем сообщения для персонажа
+    msgs = _build_messages_for_character(character, question)
+
+    # Выполняем запрос к указанной модели
+    try:
+        text, ms = chat_once(msgs, model=target_model["key"], temperature=0.2, max_tokens=400)
+        out = (text or "").strip()[:4000]
+
+        # Формируем ответ с информацией о модели
+        active_model = get_active_model()
+        model_info = f"🎯 Запрос к модели: {target_model['label']}\n"
+        if target_model["id"] == active_model["id"]:
+            model_info += f"📋 (текущая активная модель)\n"
+
+        bot.reply_to(message,
+                     f"{model_info}\n{out}\n\n({ms} мс; модель: {target_model['key']}; персонаж: {character['name']})")
+
+    except OpenRouterError as e:
+        bot.reply_to(message, f"❌ Ошибка API: {e}")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Непредвиденная ошибка: {e}")
 
 @bot.message_handler(commands=['note_stats'])
 def note_stats(message):
