@@ -64,3 +64,19 @@ def test_get_user_character_falls_back_to_default(db_module):
 
     ids = {c["id"] for c in all_chars}
     assert ch["id"] in ids, "get_user_character должен возвращать одного из существующих персонажей"
+
+
+def test_set_user_character_rejects_unknown_id(db_module):
+    db = db_module
+
+    # Берём гарантированно несуществующий ID персонажа
+    unknown_character_id = 999999
+
+    # Пользователь для теста
+    test_user_id = 888001
+
+    with pytest.raises(ValueError) as excinfo:
+        db.set_user_character(test_user_id, unknown_character_id)
+
+    # Проверяем сообщение об ошибке
+    assert "Неверный ID персонажа" in str(excinfo.value)
